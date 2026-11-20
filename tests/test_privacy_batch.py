@@ -72,6 +72,20 @@ class PrivacyBatchTest(unittest.TestCase):
                                lambda dev, commands: [privacy.shell(dev, cmd) for cmd in commands]):
             return privacy.audit(device)
 
+    def test_bundle_deadlines_allow_each_command_its_individual_budget(self):
+        device = FakeTV(10)
+        with mock.patch.object(device, "shell", wraps=device.shell) as shell:
+            privacy.audit(device)
+        self.assertEqual([call.kwargs["read_timeout_s"] for call in shell.call_args_list],
+                         [120.0, 120.0, 360.0, 1200.0, 1200.0])
+
+    def test_fallback_reads_keep_individual_deadlines(self):
+        device = FakeTV(0, malformed="truncated")
+        with mock.patch.object(device, "shell", wraps=device.shell) as shell:
+            privacy.voice_setting_owners(device)
+        self.assertEqual([call.kwargs["read_timeout_s"] for call in shell.call_args_list],
+                         [360.0, 120.0, 120.0, 120.0])
+
     def test_call_counts_and_reports_match_individual_reads(self):
         for count, before, after in ((10, 25, 5), (25, 55, 8), (0, 5, 3)):
             with self.subTest(count=count):

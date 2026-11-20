@@ -144,8 +144,8 @@ REQUESTED_RE = re.compile(r"requested permissions:(.*?)"
 GRANTED_RE = re.compile(r"\n {4}grantedPermissions:\n((?: {6}\S.*(?:\n|$))*)")
 
 
-def shell(dev, command):
-    return (dev.shell(command, read_timeout_s=120.0) or "").strip()
+def shell(dev, command, read_timeout_s=120.0):
+    return (dev.shell(command, read_timeout_s=read_timeout_s) or "").strip()
 
 
 def connect():
@@ -197,7 +197,7 @@ def read_bundle(dev, commands):
     for index, command in enumerate(commands):
         parts.append(f"printf '\\n{marker}_{index}\\n'; {{ {command}; }} 2>&1")
     parts.append(f"printf '\\n{marker}_end\\n'")
-    output = shell(dev, "; ".join(parts))
+    output = shell(dev, "; ".join(parts), read_timeout_s=120.0 * max(1, len(commands)))
     pattern = r"\A"
     for index in range(len(commands)):
         pattern += re.escape(f"{marker}_{index}") + r"\r?\n(.*?)\r?\n"
