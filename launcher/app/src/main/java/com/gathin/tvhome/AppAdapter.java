@@ -17,13 +17,17 @@ import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
+import android.util.LruCache;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
+import android.view.ViewTreeObserver;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.OvershootInterpolator;
 import android.widget.FrameLayout;
@@ -42,6 +46,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * App tiles. The first {@link MainActivity#COLUMNS} positions are the pinned dock (favourites, fixed order,
@@ -74,6 +81,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         final String pkg;
         final Drawable banner;
         final Drawable icon;
+        ResolveInfo source;
         /** Text under the tile when it is focused in the grid: the label, plus the caption for a card. */
         final String name;
         /** Ambient glow colour; 0 until sampled from the banner, or the card's accent from the start. */
@@ -221,6 +229,29 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     /** Packages drawn from their icon and name even when they have a banner (config.xml icon_tiles). */
     private final Set<String> iconTiles;
     private final List<Entry> items = new ArrayList<>();
+    private final LruCache<Entry, Artwork> artwork = new LruCache<>(16);
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final ThreadPoolExecutor artworkWorker = new ThreadPoolExecutor(1, 1, 0L,
+            TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
+    private int artworkGeneration, cacheGeneration;
+    private RecyclerView recycler;
+    private boolean firstFrame = true;
+    private final ViewTreeObserver.OnPreDrawListener firstDraw = new ViewTreeObserver.OnPreDrawListener() {
+        @Override public boolean onPreDraw() {
+            firstFrame = false;
+            recycler.getViewTreeObserver().removeOnPreDrawListener(this);
+            return true;
+        }
+    };
+
+    private static final class Artwork {
+        final Drawable banner, icon;
+
+        Artwork(Drawable banner, Drawable icon) {
+            this.banner = banner;
+            this.icon = icon;
+        }
+    }
 
     AppAdapter(Context ctx, TileListener listener, int dockSize, Config cfg) {
         this.ctx = ctx;
@@ -258,6 +289,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
      * so focus follows it); hidden_apps wins over a card, and a card's package in dock_apps takes that slot.
      */
     void reload(List<Cards.Card> cards, List<ResolveInfo> leanback) {
+        invalidateArtwork();
+        prepareFirstFrame();
         PackageManager pm = ctx.getPackageManager();
         // The LEANBACK query is shared with the module-card check (MainActivity); copy it before adding
         // library apps so the caller's list stays as it was.
@@ -296,20 +329,11 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             String label = card != null ? card.label : Cards.cleanLabel(
                     appLabels.containsKey(pkg) ? appLabels.get(pkg) : String.valueOf(ri.loadLabel(pm)), pkg);
             if (!seen.add(pkg + '\n' + label)) continue;
-            Drawable banner = null;
-            // uniform_tiles draws the icon, so an app's banner is never loaded. A module card keeps its banner.
-            if (!(uniformTiles && card == null)) {
-                banner = bundledBanner(appBanners.get(pkg));
-                if (banner == null) banner = iconTiles.contains(pkg) ? iconBanner(ri.loadIcon(pm)) : loadBanner(pm, ri);
-            }
-            // The icon is only drawn (and sampled for the glow) when there is no banner, so a tile with a
-            // banner skips loading and decoding it.
-            Drawable icon = banner == null ? ri.loadIcon(pm) : null;
-            if (card != null) {
-                fresh.add(new Entry(Entry.CARD, label, component, banner, icon, card.caption, card.accent));
-            } else {
-                fresh.add(new Entry(label, component, banner, icon));
-            }
+            Entry entry = card != null
+                    ? new Entry(Entry.CARD, label, component, null, null, card.caption, card.accent)
+                    : new Entry(label, component, null, null);
+            entry.source = ri;
+            fresh.add(entry);
         }
         Collections.sort(fresh, (a, b) -> {
             // The owner's own order first; tiles it does not know (new installs) follow by the rule below.
@@ -343,6 +367,94 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         items.clear();
         items.addAll(fresh);
         notifyDataSetChanged();
+    }
+
+    private Artwork loadArtwork(Entry entry) {
+        if (entry.source == null) return new Artwork(entry.banner, entry.icon);
+        PackageManager pm = ctx.getPackageManager();
+        Drawable banner = null;
+        if (!(uniformTiles && entry.kind != Entry.CARD)) {
+            banner = bundledBanner(appBanners.get(entry.pkg));
+            if (banner == null) banner = iconTiles.contains(entry.pkg)
+                    ? iconBanner(entry.source.loadIcon(pm)) : loadBanner(pm, entry.source);
+        }
+        return new Artwork(banner, banner == null ? entry.source.loadIcon(pm) : null);
+    }
+
+    private void prepareFirstFrame() {
+        firstFrame = true;
+        if (recycler != null) {
+            recycler.getViewTreeObserver().removeOnPreDrawListener(firstDraw);
+            recycler.getViewTreeObserver().addOnPreDrawListener(firstDraw);
+        }
+    }
+
+    @Override public void onAttachedToRecyclerView(@NonNull RecyclerView view) {
+        recycler = view;
+        prepareFirstFrame();
+    }
+
+    @Override public void onDetachedFromRecyclerView(@NonNull RecyclerView view) {
+        view.getViewTreeObserver().removeOnPreDrawListener(firstDraw);
+        recycler = null;
+    }
+
+    void trimArtwork() {
+        cacheGeneration++;
+        artwork.evictAll();
+    }
+
+    private void invalidateArtwork() {
+        artworkGeneration++;
+        trimArtwork();
+        artworkWorker.getQueue().clear();
+        main.removeCallbacksAndMessages(null);
+    }
+
+    void close() {
+        invalidateArtwork();
+        artworkWorker.shutdownNow();
+    }
+
+    private void cancelArtwork(Holder holder) {
+        if (holder.artworkTask != null) {
+            holder.artworkTask.cancel();
+            artworkWorker.remove(holder.artworkTask);
+            holder.artworkTask = null;
+        }
+    }
+
+    @Override public void onViewRecycled(@NonNull RecyclerView.ViewHolder holder) {
+        if (!(holder instanceof Holder)) return;
+        Holder h = (Holder) holder;
+        cancelArtwork(h);
+        h.bound = null;
+        h.artwork = null;
+        h.banner.setImageDrawable(null);
+        h.icon.setImageDrawable(null);
+    }
+
+    private void bindArtwork(Holder holder, Entry entry) {
+        Artwork art = artwork.get(entry);
+        if (art == null && (firstFrame || entry.source == null)) {
+            art = loadArtwork(entry);
+            artwork.put(entry, art);
+        }
+        showArtwork(holder, entry, art);
+        if (art != null) return;
+        int generation = artworkGeneration, cache = cacheGeneration;
+        holder.artworkTask = new ArtworkTask<>(() -> loadArtwork(entry), action -> main.post(action), result -> {
+            if (generation != artworkGeneration || holder.bound != entry) return;
+            holder.artworkTask = null;
+            if (result == null) return;
+            if (cache == cacheGeneration) artwork.put(entry, result);
+            showArtwork(holder, entry, result);
+            int position = holder.getBindingAdapterPosition();
+            if (holder.card.isFocused() && position != RecyclerView.NO_POSITION) {
+                listener.onTileFocused(position, holder.card);
+            }
+        });
+        artworkWorker.execute(holder.artworkTask);
     }
 
     /** icon_tiles: the app's icon centred on a dark banner-shaped tile, for apps whose own banner crops badly. */
@@ -391,6 +503,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
     /** Lets go of every tile and its artwork (Home is in the background and memory is short). */
     void clear() {
+        invalidateArtwork();
         items.clear();
         notifyDataSetChanged();
     }
@@ -460,6 +573,9 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         if (isLibraryAt(position)) return;
         Holder h = (Holder) holder;
         Entry e = items.get(position);
+        cancelArtwork(h);
+        h.bound = e;
+        h.artwork = null;
         if (e.kind == Entry.EMPTY) {
             // A free dock slot keeps its place in the row and the band, but shows nothing and takes no focus.
             h.card.setVisibility(View.INVISIBLE);
@@ -487,26 +603,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         h.card.setTranslationZ(focused && advancedEffects ? 8f * ctx.getResources().getDisplayMetrics().density : 0f);
         h.banner.setScaleX(focused && advancedEffects ? 1.035f : 1f);
         h.banner.setScaleY(focused && advancedEffects ? 1.035f : 1f);
-        // A fully opaque banner covers the whole card (centerCrop), so the card's own fill under it is drawn for
-        // nothing on every frame; keep it under banners with transparent parts and under icon tiles.
-        h.card.setBackground(e.banner != null && e.banner.getOpacity() == PixelFormat.OPAQUE ? null : h.cardBackground);
-        if (uniformTiles && e.banner == null) {
-            if (e.backdrop == null) e.backdrop = backdrop(e.icon, ambientColorAt(position));
-            h.card.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, e.backdrop));
-        }
-        if (e.banner != null) {
-            h.banner.setImageDrawable(e.banner);
-            h.banner.setVisibility(View.VISIBLE);
-            h.icon.setVisibility(View.GONE);
-            h.label.setVisibility(View.GONE);
-        } else {
-            h.banner.setImageDrawable(null);
-            h.banner.setVisibility(View.GONE);
-            h.icon.setImageDrawable(e.icon);
-            h.icon.setVisibility(View.VISIBLE);
-            h.label.setText(e.label);
-            h.label.setVisibility(uniformTiles ? View.GONE : View.VISIBLE);
-        }
+        bindArtwork(h, e);
         h.card.setOnClickListener(v -> launch(e));
         h.card.setOnLongClickListener(v -> {
             if (tileMenu) {
@@ -522,6 +619,34 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             }
             return true;
         });
+    }
+
+    private void showArtwork(Holder h, Entry e, Artwork art) {
+        h.artwork = art;
+        Drawable banner = art != null ? art.banner : null;
+        Drawable icon = art != null ? art.icon : null;
+        // A fully opaque banner covers the whole card (centerCrop), so the card's own fill under it is drawn for
+        // nothing on every frame; keep it under banners with transparent parts and under icon tiles.
+        h.card.setBackground(banner != null && banner.getOpacity() == PixelFormat.OPAQUE ? null : h.cardBackground);
+        if (uniformTiles && banner == null && art != null) {
+            if (e.ambient == 0) e.ambient = dominantColor(icon);
+            if (e.backdrop == null) e.backdrop = backdrop(icon, e.ambient);
+            h.card.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, e.backdrop));
+        }
+        if (banner != null) {
+            h.banner.setImageDrawable(banner);
+            h.banner.setVisibility(View.VISIBLE);
+            h.icon.setImageDrawable(null);
+            h.icon.setVisibility(View.GONE);
+            h.label.setVisibility(View.GONE);
+        } else {
+            h.banner.setImageDrawable(null);
+            h.banner.setVisibility(View.GONE);
+            h.icon.setImageDrawable(icon);
+            h.icon.setVisibility(View.VISIBLE);
+            h.label.setText(e.label);
+            h.label.setVisibility(uniformTiles ? View.GONE : View.VISIBLE);
+        }
     }
 
     /** Opens the tile's activity by explicit component, with no extras: a card can name nothing else. */
@@ -670,7 +795,14 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     Drawable artworkAt(int position) {
         if (position < 0 || position >= items.size()) return null;
         Entry e = items.get(position);
-        return e.banner != null ? e.banner : e.icon;
+        Artwork art = artworkAt(position, e);
+        return art == null ? null : art.banner != null ? art.banner : art.icon;
+    }
+
+    private Artwork artworkAt(int position, Entry entry) {
+        RecyclerView.ViewHolder holder = recycler == null ? null : recycler.findViewHolderForAdapterPosition(position);
+        if (holder instanceof Holder && ((Holder) holder).bound == entry) return ((Holder) holder).artwork;
+        return artwork.get(entry);
     }
 
     float focusScale() {
@@ -682,7 +814,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         if (position < 0 || position >= items.size()) return 0xFF444444;
         Entry e = items.get(position);
         if (e.ambient == 0) {
-            e.ambient = uniformTiles && e.banner == null ? dominantColor(e.icon) : vividColor(e.banner != null ? e.banner : e.icon);
+            Artwork art = artworkAt(position, e);
+            if (art == null) return 0xFF444444;
+            e.ambient = uniformTiles && art.banner == null ? dominantColor(art.icon)
+                    : vividColor(art.banner != null ? art.banner : art.icon);
         }
         return e.ambient;
     }
@@ -882,6 +1017,9 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     }
 
     static final class Holder extends RecyclerView.ViewHolder {
+        Entry bound;
+        Artwork artwork;
+        ArtworkTask<Artwork> artworkTask;
         final View card;
         /** item_app.xml's tile_bg: the dark card behind an icon tile, or behind a banner that has transparent parts. */
         final Drawable cardBackground;
