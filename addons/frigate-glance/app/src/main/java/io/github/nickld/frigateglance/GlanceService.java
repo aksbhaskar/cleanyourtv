@@ -193,11 +193,6 @@ public class GlanceService extends Service {
         if (s != null && s.card != null) s.card.endHold();
     }
 
-    public static boolean isCardShowing() {
-        GlanceService s = instance;
-        return s != null && s.card != null && s.card.reviewId() != null;
-    }
-
     /** What the Overview shows; read from the settings screen's thread, so a copy of volatile fields. */
     static final class Overview {
         boolean running, mqttUp, frigateUp;

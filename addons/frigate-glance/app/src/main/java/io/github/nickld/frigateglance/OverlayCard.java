@@ -390,11 +390,6 @@ final class OverlayCard implements CardView {
         problem.setVisibility(why == null ? View.GONE : View.VISIBLE);
     }
 
-    /** Current review id on screen, or null. */
-    String reviewId() {
-        return reviewId;
-    }
-
     private Bitmap decode(byte[] jpeg) {
         BitmapFactory.Options o = new BitmapFactory.Options();
         o.inJustDecodeBounds = true;
