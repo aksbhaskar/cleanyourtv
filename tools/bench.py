@@ -225,17 +225,6 @@ def key_event_time(tv, keycode, binary=None):
     state["misses"] += 1
     return None
 
-def android_uptime(tv, package=None, binary=None):
-    """The Android uptime in ms, the clock the frame timestamps use.
-
-    `dumpsys gfxinfo` prints it as "Uptime: <ms> Realtime: <ms>". /proc/uptime is NOT the same
-    clock: it counts the time the device spent suspended, so it runs hours ahead of the frames.
-    """
-    what = f"dumpsys gfxinfo {package}" if package else "dumpsys gfxinfo"
-    out = tv.shell(what)
-    match = re.search(r"^Uptime:\s*(\d+)", out, re.M)
-    return int(match.group(1)) if match else None
-
 
 def measure_key(tv, keycode, binary=None, package=None):
     """Inject one key and return (response_ms, movement_ms, frames, janky) or None."""
