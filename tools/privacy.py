@@ -23,6 +23,7 @@ record written before the first change, replayed by `tools/restore.sh`.
 import os
 import re
 import sys
+import uuid
 
 # Names from the TV end up inside commands run by its shell, so nothing that could carry shell syntax
 # goes through. Same rule as tools/recovery.py.
@@ -189,11 +190,29 @@ def query_packages(dev):
     return installed, disabled
 
 
+def read_bundle(dev, commands):
+    """Read a bounded group, retrying individually if framing was lost."""
+    marker = "CYTV_" + uuid.uuid4().hex
+    parts = []
+    for index, command in enumerate(commands):
+        parts.append(f"printf '\\n{marker}_{index}\\n'; {{ {command}; }} 2>&1")
+    parts.append(f"printf '\\n{marker}_end\\n'")
+    output = shell(dev, "; ".join(parts))
+    pattern = r"\A"
+    for index in range(len(commands)):
+        pattern += re.escape(f"{marker}_{index}") + r"\r?\n(.*?)\r?\n"
+    pattern += re.escape(f"{marker}_end") + r"\Z"
+    match = re.fullmatch(pattern, output, re.S)
+    if match:
+        return [value.strip() for value in match.groups()]
+    return [shell(dev, command) for command in commands]
+
+
 def voice_setting_owners(dev):
     """package name -> the secure settings that name it (the firmware's own pick for the assistant)."""
     owners = {}
-    for key in VOICE_SETTINGS:
-        value = shell(dev, f"settings get secure {key}")
+    values = read_bundle(dev, [f"settings get secure {key}" for key in VOICE_SETTINGS])
+    for key, value in zip(VOICE_SETTINGS, values):
         if not value or value == "null" or "/" not in value:
             continue
         package = value.split("/", 1)[0].strip()
@@ -205,6 +224,11 @@ def voice_setting_owners(dev):
 def probe(dev, name):
     """What the package declares about the microphone, and its returned AppOps history."""
     dump = shell(dev, f"dumpsys package {name}")
+    ops = shell(dev, f"appops get {name} RECORD_AUDIO")
+    return probe_output(dump, ops)
+
+
+def probe_output(dump, ops):
     uid = None
     declared = None
     if dump:
@@ -213,7 +237,6 @@ def probe(dev, name):
         own = dump.split("\nShared users:", 1)[0]
         block = REQUESTED_RE.search(own) or GRANTED_RE.search(own)
         declared = bool(block and "android.permission.RECORD_AUDIO" in block.group(1))
-    ops = shell(dev, f"appops get {name} RECORD_AUDIO")
     return {"uid": uid, "declared": declared, "appops": ops}
 
 
@@ -273,8 +296,16 @@ def audit(dev):
     probes = (candidates + hinted)[:MAX_PROBES]
 
     entries = []
+    readings = {}
+    for start in range(0, len(probes), 5):
+        chunk = probes[start:start + 5]
+        commands = [command for name in chunk for command in
+                    (f"dumpsys package {name}", f"appops get {name} RECORD_AUDIO")]
+        values = read_bundle(dev, commands)
+        for index, name in enumerate(chunk):
+            readings[name] = probe_output(*values[index * 2:index * 2 + 2])
     for name in probes:
-        category, note, evidence = classify(name, owners, probe(dev, name))
+        category, note, evidence = classify(name, owners, readings[name])
         entries.append({
             "name": name,
             "category": category,
