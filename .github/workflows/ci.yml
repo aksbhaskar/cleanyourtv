@@ -53,20 +53,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - name: Check launcher inputs
+        id: launcher-inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          build=true
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            git diff --no-renames --name-only -z "$BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/launcher-changes"
+            build=false
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                launcher/*|themes/*|.github/workflows/*) build=true; break ;;
+                docs/*|examples/*|tests/*|tools/*) ;;
+                README*.md|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|SECURITY.md|SHOWCASE.md|CODE_OF_CONDUCT.md|PROMPT.md) ;;
+                *) build=true; break ;;
+              esac
+            done < "$RUNNER_TEMP/launcher-changes"
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "Launcher build required: $build"
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        if: steps.launcher-inputs.outputs.build == 'true'
         with:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        if: steps.launcher-inputs.outputs.build == 'true'
         with:
           packages: platforms;android-34 build-tools;34.0.0
       - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        if: steps.launcher-inputs.outputs.build == 'true'
       - name: Unit tests, lint and release build
+        if: steps.launcher-inputs.outputs.build == 'true'
         working-directory: launcher
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon testReleaseUnitTest lintRelease assembleRelease
       - name: The launcher stays small
+        if: steps.launcher-inputs.outputs.build == 'true'
         run: |
           size=$(stat -c %s launcher/app/build/outputs/apk/release/app-release.apk)
           echo "release APK: $((size / 1024)) KB"
