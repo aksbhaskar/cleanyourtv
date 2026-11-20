@@ -216,7 +216,7 @@ def decorate(card):
     for cx, cy, s in ((92, 70, 1.3), (1548, 150, 1.3), (565, 352, 1.1), (1090, 478, 1.0), (140, 585, 1.2),
                       (1480, 650, 1.1), (800, 760, 1.0)):
         bat(cx, cy, s)
-    card.alpha_composite(deco) if hasattr(card, "alpha_composite") and card.mode == "RGBA" else card.paste(deco, (0, 0), deco)
+    card.paste(deco, (0, 0), deco)
 
 
 stats, featured = load("docs/stats-halloween.png" if HALLOWEEN else "docs/stats.png"), load("docs/featured.png")
