@@ -98,7 +98,8 @@ class ColdStartOrderTest(unittest.TestCase):
             return out
         tv.shell = shell_with_start
 
-        with mock.patch.object(bench, "other_app", lambda _tv: "com.android.tv.settings/.MainSettings"):
+        with mock.patch.object(bench, "other_app", lambda _tv: "com.android.tv.settings/.MainSettings"), \
+                mock.patch.object(bench.time, "sleep"):
             bench.cold_start(tv, "com.gathin.tvhome/.MainActivity", 1)
 
         self.assertIn("measure", order, order)

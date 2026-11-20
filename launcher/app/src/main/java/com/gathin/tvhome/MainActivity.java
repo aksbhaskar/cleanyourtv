@@ -1277,6 +1277,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
+        adapter.trimArtwork();
         // RUNNING_LOW and CRITICAL also arrive while Home is visible when an accessibility service keeps the
         // process in the foreground; never blank the screen the owner is looking at.
         if (!MemoryTrimPolicy.shouldRelease(level, started)) return;
@@ -1306,6 +1307,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        adapter.close();
         RemoteKeys.release(this);
         cancelHoldOk();
         if (gameDay != null) gameDay.shutdown();
@@ -1880,6 +1882,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             }
         } else {
             hero.setY(y);
+            if (ambientGlow && color != ambientColor) {
+                if (advancedEffects) transitionAmbient(color);
+                else setAmbient(color);
+            }
             // onPause cancels the fade-ins, and a second Home during one lands on the same tile, which starts none:
             // finish them, or the shelf and the glow stay dim until focus moves to another app.
             if (hero.getAlpha() < 1f) hero.animate().alpha(1f).setDuration(260).start();
@@ -1956,7 +1962,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             art = HeroArt.from(adapter.artworkAt(position));
             if (art != null) heroArtCache.put(key, art);
         }
-        heroArtKey = key;
+        heroArtKey = art == null ? null : key;
         final Bitmap next = art;
         if (!animations || reducedMotion || heroArt.getAlpha() == 0f) {
             heroArt.setImageBitmap(next);
