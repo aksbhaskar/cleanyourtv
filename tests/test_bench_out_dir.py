@@ -46,7 +46,7 @@ class Device:
         if "resolve-activity" in command:
             return "priority=0\\n  com.gathin.tvhome/.MainActivity\\n"
         if "dumpsys package" in command:
-            return "versionName=1.2.3"
+            raise SystemExit("fake TV: output path accepted")
         return ""
 
     def close(self):
